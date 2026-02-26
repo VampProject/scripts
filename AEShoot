@@ -5,11 +5,11 @@ local PREDICCION         = 0.10  -- Predice la posición futura del enemigo en p
 local PREDICCION_DISPARO = 0.145 -- Igual que PREDICCION pero para la dirección del autoshoot
 local PODER_KILL         = 5     -- Cuántas veces se envía el remote "kill" por disparo
 local DELAY_KILL         = 0.03  -- Segundos entre cada envío del remote "kill"
-local ESP_ACTIVADO       = true  -- Mostrar ESP box + skeleton a todos los jugadores cercanos (toggle con Z)
-local ESP_DISTANCIA      = 500   -- Distancia máxima en studs para mostrar el ESP
+local ESP_ACTIVADO       = false  -- Mostrar ESP box + skeleton a todos los jugadores cercanos (toggle con Z)
+local ESP_DISTANCIA      = 500   
 local ESP_COLOR          = Color3.fromRGB(0, 255, 0)
-local ESP_GROSOR_BOX     = 1.5   -- Grosor del box
-local ESP_GROSOR_SKEL    = 1     -- Grosor del skeleton
+local ESP_GROSOR_BOX     = 1.5   
+local ESP_GROSOR_SKEL    = 1     
 -- =========================================================
 
 local Players          = game:GetService("Players")
@@ -33,7 +33,7 @@ local CONEXIONES_ESQUELETO = {
     {"LeftLowerArm","LeftHand"},{"RightLowerArm","RightHand"},
 }
 
-print("[AutoClick] F=autoclick  Z=esp")
+print("[AeShoot] F=Autoclick  Z=Esp")
 
 local function EsEnemigo(jugador)
     if jugador == LP then return false end
@@ -122,50 +122,40 @@ local function cursorSobreHitbox(charEnemigo, posMouse, eHRP)
     return false
 end
 
--- ─── ESP: bounding box 3D → 8 esquinas → 2D ─────────
---
--- Para cada BasePart calculamos las 8 esquinas del cubo
--- en espacio mundo usando su CFrame y Size, luego
--- proyectamos cada esquina a pantalla con WorldToViewportPoint.
--- Tomamos el min/max de X e Y en píxeles → box perfecto
--- sin importar distancia ni rotación del personaje.
-
--- Cache de partes por jugador para no llamar GetDescendants cada frame
-local cacheParts = {}
-
-local function actualizarCacheParts(jugador)
-    if not jugador.Character then return end
-    local partes = {}
-    for _, v in ipairs(jugador.Character:GetDescendants()) do
-        if v:IsA("BasePart") then
-            partes[#partes+1] = v
-        end
-    end
-    cacheParts[jugador] = partes
+local function esquinas3D(cf, size)
+    local hx, hy, hz = size.X/2, size.Y/2, size.Z/2
+    return {
+        cf * Vector3.new( hx,  hy,  hz),
+        cf * Vector3.new(-hx,  hy,  hz),
+        cf * Vector3.new( hx, -hy,  hz),
+        cf * Vector3.new(-hx, -hy,  hz),
+        cf * Vector3.new( hx,  hy, -hz),
+        cf * Vector3.new(-hx,  hy, -hz),
+        cf * Vector3.new( hx, -hy, -hz),
+        cf * Vector3.new(-hx, -hy, -hz),
+    }
 end
 
--- Box usando solo Head (arriba) y HRP+pies (abajo): O(1) en vez de O(n partes)
--- Preciso porque la altura del personaje es fija
 local function calcularBox2D(char)
-    local eCab = char:FindFirstChild("Head")
-    local eHRP = char:FindFirstChild("HumanoidRootPart")
-    if not eCab or not eHRP then return nil end
+    local minX, minY = math.huge,  math.huge
+    local maxX, maxY = -math.huge, -math.huge
+    local alguna = false
 
-    -- Punto más alto: encima de la cabeza
-    -- Punto más bajo: debajo del HRP (pies)
-    local puntoTop  = eCab.Position + Vector3.new(0,  eCab.Size.Y * 0.6, 0)
-    local puntoBtm  = eHRP.Position - Vector3.new(0,  3.1, 0)
+    for _, parte in ipairs(char:GetDescendants()) do
+        if not parte:IsA("BasePart") then continue end
+        for _, esquina in ipairs(esquinas3D(parte.CFrame, parte.Size)) do
+            local sp, enP = Cam:WorldToViewportPoint(esquina)
+            if not enP or sp.Z <= 0 then continue end
+            if sp.X < minX then minX = sp.X end
+            if sp.Y < minY then minY = sp.Y end
+            if sp.X > maxX then maxX = sp.X end
+            if sp.Y > maxY then maxY = sp.Y end
+            alguna = true
+        end
+    end
 
-    local spT, enT = Cam:WorldToViewportPoint(puntoTop)
-    local spB, enB = Cam:WorldToViewportPoint(puntoBtm)
-    if not enT or not enB or spT.Z <= 0 or spB.Z <= 0 then return nil end
-
-    -- Ancho proporcional a la altura proyectada
-    local h = math.abs(spB.Y - spT.Y)
-    local w = h * 0.4
-
-    local cx = (spT.X + spB.X) * 0.5
-    return cx - w, spT.Y, cx + w, spB.Y
+    if not alguna then return nil end
+    return minX, minY, maxX, maxY
 end
 
 local function nuevaLinea(grosor)
@@ -255,30 +245,25 @@ end
 local function registrar(p)
     if p == LP then return end
     espDatos[p] = crearESP()
-    p.CharacterAdded:Connect(function(char)
-        task.wait(0.5)
+    p.CharacterAdded:Connect(function()
+        task.wait(0.3)
         if not espDatos[p] then espDatos[p] = crearESP() end
-        actualizarCacheParts(p)
     end)
-    if p.Character then actualizarCacheParts(p) end
 end
 
 Players.PlayerAdded:Connect(registrar)
 Players.PlayerRemoving:Connect(function(p)
-    destruirESP(espDatos[p]); espDatos[p] = nil; cacheParts[p] = nil
+    destruirESP(espDatos[p]); espDatos[p] = nil
 end)
 for _, p in pairs(Players:GetPlayers()) do registrar(p) end
 
--- ESP en RenderStepped (sincronizado con render, más suave que Heartbeat)
-RunService.RenderStepped:Connect(function()
+RunService.Heartbeat:Connect(function()
     for _, p in pairs(Players:GetPlayers()) do
         if p == LP then continue end
         if not espDatos[p] then espDatos[p] = crearESP() end
         actualizarESP(p, espDatos[p])
     end
-end)
 
-RunService.Heartbeat:Connect(function()
     if not activado then return end
     local ahora    = tick()
     local posMouse = UserInputService:GetMouseLocation()
@@ -308,7 +293,7 @@ UserInputService.InputBegan:Connect(function(input, procesado)
     if procesado then return end
     if input.KeyCode == Enum.KeyCode.F then
         activado = not activado
-        print("[AutoClick]", activado and "ACTIVADO" or "DESACTIVADO")
+        print("[AeShoot]", activado and "ACTIVADO" or "DESACTIVADO")
     end
     if input.KeyCode == Enum.KeyCode.Z then
         ESP_ACTIVADO = not ESP_ACTIVADO
