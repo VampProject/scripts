@@ -1,305 +1,246 @@
--- ===================== CONFIGURACION =====================
-local PROBABILIDAD       = 1.00  -- Chance de auto-click al detectar enemigo (1.00 = 100%, 0.70 = 70%)
-local RETARDO            = 0.0   -- Segundos de espera mínima entre cada click automático (0 = sin espera)
-local PREDICCION         = 0.10  -- Predice la posición futura del enemigo en pantalla según su velocidad
-local PREDICCION_DISPARO = 0.145 -- Igual que PREDICCION pero para la dirección del autoshoot
-local PODER_KILL         = 5     -- Cuántas veces se envía el remote "kill" por disparo
-local DELAY_KILL         = 0.03  -- Segundos entre cada envío del remote "kill"
-local ESP_ACTIVADO       = false  -- Mostrar ESP box + skeleton a todos los jugadores cercanos (toggle con Z)
-local ESP_DISTANCIA      = 500   
-local ESP_COLOR          = Color3.fromRGB(0, 255, 0)
-local ESP_GROSOR_BOX     = 1.5   
-local ESP_GROSOR_SKEL    = 1     
--- =========================================================
-
-local Players          = game:GetService("Players")
-local RunService       = game:GetService("RunService")
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
+local Workspace = game:GetService("Workspace")
 
-local LP  = Players.LocalPlayer
-local Cam = workspace.CurrentCamera
+local LocalPlayer = Players.LocalPlayer
+local Camera = workspace.CurrentCamera
+local mouse = LocalPlayer:GetMouse()
 
-local activado    = true
-local ultimoClick = 0
-local espDatos    = {}
+local triggerEnabled = false
+local espEnabled = false
+local teamCache = {}
+local losCache = {}
+local firing = false
+local espObjects = {}
 
-local CONEXIONES_ESQUELETO = {
-    {"Head","UpperTorso"},{"UpperTorso","LowerTorso"},
-    {"LowerTorso","LeftUpperLeg"},{"LowerTorso","RightUpperLeg"},
-    {"LeftUpperLeg","LeftLowerLeg"},{"RightUpperLeg","RightLowerLeg"},
-    {"LeftLowerLeg","LeftFoot"},{"RightLowerLeg","RightFoot"},
-    {"UpperTorso","LeftUpperArm"},{"UpperTorso","RightUpperArm"},
-    {"LeftUpperArm","LeftLowerArm"},{"RightUpperArm","RightLowerArm"},
-    {"LeftLowerArm","LeftHand"},{"RightLowerArm","RightHand"},
+local RED = Color3.fromRGB(255, 0, 0)
+local GREEN = Color3.fromRGB(0, 255, 0)
+
+local testSquare = Drawing.new("Square")
+testSquare.Visible = true
+testSquare.Color = Color3.fromRGB(255, 0, 0)
+testSquare.Thickness = 2
+testSquare.Filled = false
+testSquare.Transparency = 0
+testSquare.Size = Vector2.new(40, 40)
+testSquare.Position = Vector2.new(20, 20)
+
+local skeletonParts = {
+    "Head", "UpperTorso", "LowerTorso",
+    "LeftUpperArm", "LeftLowerArm", "LeftHand",
+    "RightUpperArm", "RightLowerArm", "RightHand",
+    "LeftUpperLeg", "LeftLowerLeg", "LeftFoot",
+    "RightUpperLeg", "RightLowerLeg", "RightFoot",
+    "Torso", "Left Arm", "Right Arm", "Left Leg", "Right Leg"
+}
+local connections = {
+    {"Head", "UpperTorso"}, {"UpperTorso", "LowerTorso"},
+    {"UpperTorso", "LeftUpperArm"}, {"LeftUpperArm", "LeftLowerArm"}, {"LeftLowerArm", "LeftHand"},
+    {"UpperTorso", "RightUpperArm"}, {"RightUpperArm", "RightLowerArm"}, {"RightLowerArm", "RightHand"},
+    {"LowerTorso", "LeftUpperLeg"}, {"LeftUpperLeg", "LeftLowerLeg"}, {"LeftLowerLeg", "LeftFoot"},
+    {"LowerTorso", "RightUpperLeg"}, {"RightUpperLeg", "RightLowerLeg"}, {"RightLowerLeg", "RightFoot"},
+    {"Head", "Torso"}, {"Torso", "Left Arm"}, {"Torso", "Right Arm"},
+    {"Torso", "Left Leg"}, {"Torso", "Right Leg"}
 }
 
-print("[AeShoot] F=Autoclick  Z=Esp")
-
-local function EsEnemigo(jugador)
-    if jugador == LP then return false end
-    if not jugador.Character then return false end
-    local hum = jugador.Character:FindFirstChild("Humanoid")
-    if not hum or hum.Health <= 0 then return false end
-    return (jugador:GetAttribute("Team") or "nothing") ~= (LP:GetAttribute("Team") or "nothing")
-       and (jugador:GetAttribute("Game") or "nothing") == (LP:GetAttribute("Game") or "nothing")
-end
-
-local function tieneLoS(charEnemigo)
-    local char = LP.Character
-    if not char then return false end
-    local miHRP = char:FindFirstChild("HumanoidRootPart")
-    if not miHRP then return false end
-    local filtro = {char}
-    for _, p in pairs(Players:GetPlayers()) do
-        if p ~= LP and p.Character then table.insert(filtro, p.Character) end
-    end
-    local params = RaycastParams.new()
-    params.FilterType = Enum.RaycastFilterType.Exclude
-    params.FilterDescendantsInstances = filtro
-    local eHRP    = charEnemigo:FindFirstChild("HumanoidRootPart")
-    local eCabeza = charEnemigo:FindFirstChild("Head")
-    if not eHRP then return false end
-    local puntos = {eHRP.Position, eHRP.Position + Vector3.new(0,0.5,0), eHRP.Position + Vector3.new(0,-1.5,0)}
-    if eCabeza then table.insert(puntos, eCabeza.Position) end
-    for _, origen in ipairs({miHRP.Position, Cam.CFrame.Position}) do
-        for _, punto in ipairs(puntos) do
-            if not workspace:Raycast(origen, punto - origen, params) then return true end
+task.spawn(function()
+    while task.wait(1) do
+        for _, plr in Players:GetPlayers() do
+            teamCache[plr] = plr.Team
         end
-    end
-    return false
-end
-
-local function obtenerArma()
-    local char = LP.Character
-    if not char then return nil end
-    for _, tool in pairs(char:GetChildren()) do
-        if tool:IsA("Tool") and tool:FindFirstChild("fire") and tool:FindFirstChild("showBeam") and tool:FindFirstChild("kill") then
-            return tool
-        end
-    end
-end
-
-local function dispararAuto(datos)
-    local char = LP.Character
-    if not char then return end
-    local hrp  = char:FindFirstChild("HumanoidRootPart")
-    local arma = obtenerArma()
-    if not hrp or not arma then return end
-    local fireEvent     = arma:FindFirstChild("fire")
-    local showBeamEvent = arma:FindFirstChild("showBeam")
-    local killEvent     = arma:FindFirstChild("kill")
-    local handle        = arma:FindFirstChild("Handle")
-    if not (fireEvent and showBeamEvent and killEvent and handle) then return end
-    local posObjetivo = datos.hrp.Position + (datos.hrp.AssemblyLinearVelocity * PREDICCION_DISPARO)
-    local direccion   = CFrame.lookAt(hrp.Position, posObjetivo).LookVector
-    fireEvent:FireServer()
-    showBeamEvent:FireServer(posObjetivo, hrp.Position, handle)
-    task.spawn(function()
-        for i = 1, PODER_KILL do
-            killEvent:FireServer(datos.jugador, direccion)
-            if i < PODER_KILL then task.wait(DELAY_KILL) end
-        end
-    end)
-end
-
-local function cursorSobreHitbox(charEnemigo, posMouse, eHRP)
-    local fov        = math.rad(Cam.FieldOfView)
-    local factorProj = Cam.ViewportSize.Y / (2 * math.tan(fov / 2))
-    for _, parte in ipairs(charEnemigo:GetDescendants()) do
-        if not parte:IsA("BasePart") then continue end
-        local posParte       = parte.Position + (eHRP.AssemblyLinearVelocity * PREDICCION)
-        local sp, enPantalla = Cam:WorldToScreenPoint(posParte)
-        if not enPantalla or sp.Z <= 0 then continue end
-        local distCam = (Cam.CFrame.Position - posParte).Magnitude
-        if distCam < 0.1 then continue end
-        local px     = factorProj / distCam
-        local mitadW = (parte.Size.X * px) * 0.55
-        local mitadH = (parte.Size.Y * px) * 0.55
-        if math.abs(posMouse.X - sp.X) <= mitadW and math.abs(posMouse.Y - sp.Y) <= mitadH then
-            return true
-        end
-    end
-    return false
-end
-
-local function esquinas3D(cf, size)
-    local hx, hy, hz = size.X/2, size.Y/2, size.Z/2
-    return {
-        cf * Vector3.new( hx,  hy,  hz),
-        cf * Vector3.new(-hx,  hy,  hz),
-        cf * Vector3.new( hx, -hy,  hz),
-        cf * Vector3.new(-hx, -hy,  hz),
-        cf * Vector3.new( hx,  hy, -hz),
-        cf * Vector3.new(-hx,  hy, -hz),
-        cf * Vector3.new( hx, -hy, -hz),
-        cf * Vector3.new(-hx, -hy, -hz),
-    }
-end
-
-local function calcularBox2D(char)
-    local minX, minY = math.huge,  math.huge
-    local maxX, maxY = -math.huge, -math.huge
-    local alguna = false
-
-    for _, parte in ipairs(char:GetDescendants()) do
-        if not parte:IsA("BasePart") then continue end
-        for _, esquina in ipairs(esquinas3D(parte.CFrame, parte.Size)) do
-            local sp, enP = Cam:WorldToViewportPoint(esquina)
-            if not enP or sp.Z <= 0 then continue end
-            if sp.X < minX then minX = sp.X end
-            if sp.Y < minY then minY = sp.Y end
-            if sp.X > maxX then maxX = sp.X end
-            if sp.Y > maxY then maxY = sp.Y end
-            alguna = true
-        end
-    end
-
-    if not alguna then return nil end
-    return minX, minY, maxX, maxY
-end
-
-local function nuevaLinea(grosor)
-    local l = Drawing.new("Line")
-    l.Thickness    = grosor
-    l.Color        = ESP_COLOR
-    l.Visible      = false
-    l.Transparency = 1
-    return l
-end
-
-local function crearESP()
-    local d = {
-        top    = nuevaLinea(ESP_GROSOR_BOX),
-        bottom = nuevaLinea(ESP_GROSOR_BOX),
-        left   = nuevaLinea(ESP_GROSOR_BOX),
-        right  = nuevaLinea(ESP_GROSOR_BOX),
-        skel   = {},
-    }
-    for i = 1, #CONEXIONES_ESQUELETO do
-        d.skel[i] = nuevaLinea(ESP_GROSOR_SKEL)
-    end
-    return d
-end
-
-local function destruirESP(d)
-    if not d then return end
-    d.top:Remove(); d.bottom:Remove(); d.left:Remove(); d.right:Remove()
-    for _, l in ipairs(d.skel) do l:Remove() end
-end
-
-local function ocultarESP(d)
-    if not d then return end
-    d.top.Visible = false; d.bottom.Visible = false
-    d.left.Visible = false; d.right.Visible = false
-    for _, l in ipairs(d.skel) do l.Visible = false end
-end
-
-local function setLinea(l, x1, y1, x2, y2)
-    l.From = Vector2.new(x1, y1)
-    l.To   = Vector2.new(x2, y2)
-    l.Visible = true
-end
-
-local function actualizarESP(jugador, d)
-    if not d then return end
-    local char = jugador.Character
-    if not char or not ESP_ACTIVADO then ocultarESP(d); return end
-
-    local eHRP = char:FindFirstChild("HumanoidRootPart")
-    if not eHRP then ocultarESP(d); return end
-
-    local miChar = LP.Character
-    local miHRP  = miChar and miChar:FindFirstChild("HumanoidRootPart")
-    if not miHRP then ocultarESP(d); return end
-
-    if (miHRP.Position - eHRP.Position).Magnitude > ESP_DISTANCIA then
-        ocultarESP(d); return
-    end
-
-    local minX, minY, maxX, maxY = calcularBox2D(char)
-    if not minX then ocultarESP(d); return end
-
-    setLinea(d.top,    minX, minY, maxX, minY)
-    setLinea(d.bottom, minX, maxY, maxX, maxY)
-    setLinea(d.left,   minX, minY, minX, maxY)
-    setLinea(d.right,  maxX, minY, maxX, maxY)
-
-    for i, con in ipairs(CONEXIONES_ESQUELETO) do
-        local p1 = char:FindFirstChild(con[1])
-        local p2 = char:FindFirstChild(con[2])
-        local ln = d.skel[i]
-        if p1 and p2 then
-            local sp1, en1 = Cam:WorldToViewportPoint(p1.Position)
-            local sp2, en2 = Cam:WorldToViewportPoint(p2.Position)
-            if en1 and en2 and sp1.Z > 0 and sp2.Z > 0 then
-                setLinea(ln, sp1.X, sp1.Y, sp2.X, sp2.Y)
-            else
-                ln.Visible = false
-            end
-        else
-            ln.Visible = false
-        end
-    end
-end
-
-local function registrar(p)
-    if p == LP then return end
-    espDatos[p] = crearESP()
-    p.CharacterAdded:Connect(function()
-        task.wait(0.3)
-        if not espDatos[p] then espDatos[p] = crearESP() end
-    end)
-end
-
-Players.PlayerAdded:Connect(registrar)
-Players.PlayerRemoving:Connect(function(p)
-    destruirESP(espDatos[p]); espDatos[p] = nil
-end)
-for _, p in pairs(Players:GetPlayers()) do registrar(p) end
-
-RunService.Heartbeat:Connect(function()
-    for _, p in pairs(Players:GetPlayers()) do
-        if p == LP then continue end
-        if not espDatos[p] then espDatos[p] = crearESP() end
-        actualizarESP(p, espDatos[p])
-    end
-
-    if not activado then return end
-    local ahora    = tick()
-    local posMouse = UserInputService:GetMouseLocation()
-
-    for _, p in pairs(Players:GetPlayers()) do
-        if not EsEnemigo(p) or not p.Character then continue end
-        local eHRP = p.Character:FindFirstChild("HumanoidRootPart")
-        local eHum = p.Character:FindFirstChildOfClass("Humanoid")
-        if not eHRP or not eHum or eHum.Health <= 0 then continue end
-        if not cursorSobreHitbox(p.Character, posMouse, eHRP) then continue end
-        if not tieneLoS(p.Character) then continue end
-        if (ahora - ultimoClick) < RETARDO then break end
-        if math.random() <= PROBABILIDAD then
-            ultimoClick = ahora
-            mouse1click()
-            local snapP, snapHRP = p, eHRP
-            task.spawn(function()
-                task.wait(0.02)
-                dispararAuto({jugador = snapP, hrp = snapHRP})
-            end)
-        end
-        break
     end
 end)
 
-UserInputService.InputBegan:Connect(function(input, procesado)
-    if procesado then return end
+local function isEnemy(plr)
+    if not plr or plr == LocalPlayer then return false end
+    local myTeam = LocalPlayer.Team
+    local theirTeam = teamCache[plr] or plr.Team
+    if not myTeam or not theirTeam then return true end
+    return myTeam ~= theirTeam
+end
+
+local function createSkeleton()
+    local skeletonLines = {}
+    for i = 1, #connections do
+        local line = Drawing.new("Line")
+        line.Visible = false
+        line.Color = GREEN
+        line.Transparency = 1
+        skeletonLines[i] = line
+    end
+    return skeletonLines
+end
+
+
+Players.PlayerRemoving:Connect(function(plr)
+    local esp = espObjects[plr]
+    if esp then
+        for _, line in ipairs(esp) do
+            line:Remove()
+        end
+        espObjects[plr] = nil
+    end
+    losCache[plr] = nil
+end)
+
+
+UserInputService.InputBegan:Connect(function(input, gp)
+    if gp then return end
     if input.KeyCode == Enum.KeyCode.F then
-        activado = not activado
-        print("[AeShoot]", activado and "ACTIVADO" or "DESACTIVADO")
-    end
-    if input.KeyCode == Enum.KeyCode.Z then
-        ESP_ACTIVADO = not ESP_ACTIVADO
-        if not ESP_ACTIVADO then
-            for _, d in pairs(espDatos) do ocultarESP(d) end
-        end
-        print("[ESP]", ESP_ACTIVADO and "ACTIVADO" or "DESACTIVADO")
+        triggerEnabled = not triggerEnabled
+        print("AeShoot: " .. (triggerEnabled and "Activado" or "Desactivado"))
+    elseif input.KeyCode == Enum.KeyCode.Z then
+        espEnabled = not espEnabled
+        print("ESP Skeleton: " .. (espEnabled and "Activado" or "Desactivado"))
     end
 end)
+
+RunService.RenderStepped:Connect(function()
+    local localChar = LocalPlayer.Character
+    if not localChar or not localChar:FindFirstChild("HumanoidRootPart") or not localChar:FindFirstChild("Head") then
+        if firing then firing = false; mouse1release() end
+        for _, esp in pairs(espObjects) do
+            for i = 1, #esp do
+                esp[i].Visible = false
+            end
+        end
+        return
+    end
+    local ourChar = localChar
+    local ourHead = localChar.Head
+    local ourRoot = localChar.HumanoidRootPart
+    local myPos = ourRoot.Position
+
+    -- TRIGGERBOT
+    local shouldFire = false
+    local target = mouse.Target
+    if triggerEnabled and target and target.Parent then
+        local char = target.Parent
+        local hum = char:FindFirstChildOfClass("Humanoid")
+        if hum and hum.Health > 0 then
+            local plr = Players:GetPlayerFromCharacter(char)
+            if isEnemy(plr) then shouldFire = true end
+        end
+    end
+    if shouldFire ~= firing then
+        firing = shouldFire
+        if shouldFire then mouse1press() else mouse1release() end
+    end
+
+    if not espEnabled then
+        for _, esp in pairs(espObjects) do
+            for i = 1, #esp do
+                esp[i].Visible = false
+            end
+        end
+        return
+    end
+
+    for _, player in pairs(Players:GetPlayers()) do
+        if player == LocalPlayer then continue end
+        local char = player.Character
+        if not char or not char:FindFirstChild("HumanoidRootPart") or not char:FindFirstChild("Humanoid") then
+            local esp = espObjects[player]
+            if esp then
+                for i = 1, #esp do esp[i].Visible = false end
+            end
+            continue
+        end
+        local hum = char.Humanoid
+        if hum.Health <= 0 then
+            local esp = espObjects[player]
+            if esp then
+                for i = 1, #esp do esp[i].Visible = false end
+            end
+            continue
+        end
+        local root = char.HumanoidRootPart
+        local dist = (myPos - root.Position).Magnitude
+        if dist > 500 then
+            local esp = espObjects[player]
+            if esp then
+                for i = 1, #esp do esp[i].Visible = false end
+            end
+            continue
+        end
+
+        local now = tick()
+        local playerLos = losCache[player]
+        local hasLos = false
+        local theirHead = char:FindFirstChild("Head")
+        if theirHead then
+            if not playerLos or now - playerLos.tick > 0.15 then
+                local rayOrigin = theirHead.Position
+                local targetPos = ourHead.Position
+                local rayDirection = (targetPos - rayOrigin).Unit * ((targetPos - rayOrigin).Magnitude + 3)
+                local rayParams = RaycastParams.new()
+                rayParams.FilterType = Enum.RaycastFilterType.Blacklist
+                rayParams.FilterDescendantsInstances = {char}
+                local result = Workspace:Raycast(rayOrigin, rayDirection, rayParams)
+                hasLos = result and result.Instance:IsDescendantOf(ourChar)
+                losCache[player] = {los = hasLos, tick = now}
+            else
+                hasLos = playerLos.los
+            end
+        end
+        local col = hasLos and RED or GREEN
+        local partPositions = {}
+        for _, partName in ipairs(skeletonParts) do
+            local part = char:FindFirstChild(partName)
+            if part then
+                partPositions[partName] = part.Position
+            end
+        end
+
+        if not partPositions["Head"] then
+            local esp = espObjects[player]
+            if esp then
+                for i = 1, #esp do esp[i].Visible = false end
+            end
+            continue
+        end
+
+        local headPos = partPositions["Head"]
+        local headScreen, headOnScreen = Camera:WorldToViewportPoint(headPos)
+        if not headOnScreen or headScreen.Z <= 0 then
+            local esp = espObjects[player]
+            if esp then
+                for i = 1, #esp do esp[i].Visible = false end
+            end
+            continue
+        end
+
+
+        local esp = espObjects[player]
+        if not esp then
+            esp = createSkeleton()
+            espObjects[player] = esp
+        end
+
+        -- Update skeleton lines
+        local thickness = math.clamp(2500 / dist, 1, 5)
+        for i, conn in ipairs(connections) do
+            local p1Pos = partPositions[conn[1]]
+            local p2Pos = partPositions[conn[2]]
+            local line = esp[i]
+            if p1Pos and p2Pos then
+                local s1, on1 = Camera:WorldToViewportPoint(p1Pos)
+                local s2, on2 = Camera:WorldToViewportPoint(p2Pos)
+                if on1 and on2 and s1.Z > 0 and s2.Z > 0 then
+                    line.From = Vector2.new(s1.X, s1.Y)
+                    line.To = Vector2.new(s2.X, s2.Y)
+                    line.Thickness = thickness
+                    line.Color = col
+                    line.Visible = true
+                else
+                    line.Visible = false
+                end
+            else
+                line.Visible = false
+            end
+        end
+    end
+end)
+
+print("AEShoot| F: AeShoot | Z: ESP Skeleton")
